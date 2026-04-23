@@ -48,7 +48,7 @@ nmap -sV -sC -T4 -p "$open_ports" -oN "${OUTDIR}/services.txt" -oX "${OUTDIR}/se
 ok "→ services.txt"
 
 echo -e "\n${BOLD}  Serviços:${RST}"
-grep -E '^\d+/' "${OUTDIR}/services.txt" 2>/dev/null | while read -r line; do
+grep -E '^[0-9]+/' "${OUTDIR}/services.txt" 2>/dev/null | while read -r line; do
     echo -e "    ${GRN}→${RST} $line"
 done
 

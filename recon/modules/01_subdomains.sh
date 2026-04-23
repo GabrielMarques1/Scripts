@@ -60,9 +60,11 @@ has dnsrecon && { info "dnsrecon..."; dnsrecon -d "$CLEAN" -t std > "${OUTDIR}/d
 # theHarvester
 has theHarvester && { info "theHarvester..."; theHarvester -d "$CLEAN" -b all -f "${OUTDIR}/theharvester" >/dev/null 2>&1 || true; ok "→ theharvester"; }
 
-# Consolidar
+# Consolidar (só arquivos de subdomínios, não whois/dns)
 info "Consolidando..."
-cat "${OUTDIR}"/*.txt 2>/dev/null | grep -oP '[a-zA-Z0-9][-a-zA-Z0-9]*(\.[a-zA-Z0-9][-a-zA-Z0-9]*)+' \
+cat "${OUTDIR}"/crtsh.txt "${OUTDIR}"/subfinder.txt "${OUTDIR}"/amass.txt \
+    "${OUTDIR}"/assetfinder.txt "${OUTDIR}"/dnsrecon.txt 2>/dev/null \
+    | grep -oP '[a-zA-Z0-9][-a-zA-Z0-9]*(\.[a-zA-Z0-9][-a-zA-Z0-9]*)+' \
     | grep -i "${CLEAN}$" | sort -u > "${OUTDIR}/all_subdomains.txt"
 ok "Total: $(wc -l < "${OUTDIR}/all_subdomains.txt") subdomínios → all_subdomains.txt"
 

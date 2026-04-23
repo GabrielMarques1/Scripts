@@ -62,10 +62,10 @@ check_tools() {
     local missing=0
 
     echo -e "${BOLD} Essenciais:${RST}"
-    check_tool nmap       || ((missing++))
-    check_tool curl       || ((missing++))
-    check_tool dig        || ((missing++))
-    check_tool whois      || ((missing++))
+    check_tool nmap       || missing=$((missing + 1))
+    check_tool curl       || missing=$((missing + 1))
+    check_tool dig        || missing=$((missing + 1))
+    check_tool whois      || missing=$((missing + 1))
 
     echo -e "\n${BOLD} Web Recon:${RST}"
     check_tool whatweb     || true
@@ -122,7 +122,10 @@ run_module() {
         fail "Módulo não encontrado: ${module}"
         return 1
     fi
-    bash "$module_path" "$TARGET" "$OUTPUT_DIR"
+    bash "$module_path" "$TARGET" "$OUTPUT_DIR" || {
+        fail "Módulo '${module}' falhou (exit $?). Continuando..."
+        return 1
+    }
 }
 
 generate_report() {
@@ -167,16 +170,16 @@ main() {
                 [[ -z "$TARGET" ]] && { fail "Alvo vazio."; continue; }
                 setup_output "$TARGET"
                 ;;
-            1) [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo (opção 0)"; continue; }; run_module "01_subdomains.sh" ;;
-            2) [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo (opção 0)"; continue; }; run_module "02_ports.sh" ;;
-            3) [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo (opção 0)"; continue; }; run_module "03_webinfo.sh" ;;
-            4) [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo (opção 0)"; continue; }; run_module "04_dirs.sh" ;;
-            5) [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo (opção 0)"; continue; }; run_module "05_vulns.sh" ;;
+            1) [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo (opção 0)"; continue; }; run_module "01_subdomains.sh" || true ;;
+            2) [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo (opção 0)"; continue; }; run_module "02_ports.sh" || true ;;
+            3) [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo (opção 0)"; continue; }; run_module "03_webinfo.sh" || true ;;
+            4) [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo (opção 0)"; continue; }; run_module "04_dirs.sh" || true ;;
+            5) [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo (opção 0)"; continue; }; run_module "05_vulns.sh" || true ;;
             6)
                 [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo (opção 0)"; continue; }
                 info "═══ FULL RECON INICIANDO ═══"
                 for mod in 01_subdomains.sh 02_ports.sh 03_webinfo.sh 04_dirs.sh 05_vulns.sh; do
-                    [[ -f "${MODULES_DIR}/${mod}" ]] && run_module "$mod"
+                    [[ -f "${MODULES_DIR}/${mod}" ]] && { run_module "$mod" || true; }
                 done
                 generate_report
                 ok "═══ FULL RECON COMPLETO ═══"

@@ -121,8 +121,8 @@ info "CORS misconfiguration check..."
 } > "${OUTDIR}/cors_check.txt"
 ok "→ cors_check.txt"
 
-# Verificar se CORS está vulnerável
-if grep -qi "evil.com\|null" "${OUTDIR}/cors_check.txt" 2>/dev/null; then
+# Verificar se CORS está vulnerável (só nas linhas de ACAO, não no arquivo todo)
+if grep -i "access-control-allow-origin" "${OUTDIR}/cors_check.txt" 2>/dev/null | grep -qi "evil.com\|\bnull\b"; then
     echo -e "    ${RED}⚠️  Possível CORS misconfiguration!${RST}"
 fi
 

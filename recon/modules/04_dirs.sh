@@ -69,10 +69,12 @@ CALIBRATION_WORDS=()
 CALIBRATION_LINES=()
 
 for i in 1 2 3; do
-    rand_path=$(cat /dev/urandom | tr -dc 'a-z0-9' | head -c 16)
-    # Capturar size, words e lines da resposta
-    resp=$(curl -sk --connect-timeout 5 "${BASE_URL}/${rand_path}" 2>/dev/null)
-    code=$(curl -sk -o /dev/null -w "%{http_code}" --connect-timeout 5 "${BASE_URL}/${rand_path}" 2>/dev/null)
+    rand_path=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 16)
+    cal_url="${BASE_URL}/${rand_path}"
+    # Uma única request — captura body + status code juntos
+    resp=$(curl -sk --connect-timeout 5 -w '\n__HTTP_CODE__%{http_code}' "$cal_url" 2>/dev/null)
+    code=$(echo "$resp" | grep '__HTTP_CODE__' | sed 's/__HTTP_CODE__//')
+    resp=$(echo "$resp" | grep -v '__HTTP_CODE__')
     sz=${#resp}
     wc_w=$(echo "$resp" | wc -w | tr -d ' ')
     wc_l=$(echo "$resp" | wc -l | tr -d ' ')
@@ -175,7 +177,7 @@ if has ffuf; then
     VHOST_WL="/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
     if [[ -f "$VHOST_WL" ]]; then
         # Calibrar: pegar size de um vhost aleatório inexistente
-        rand_vhost=$(cat /dev/urandom | tr -dc 'a-z' | head -c 12)
+        rand_vhost=$(tr -dc 'a-z' < /dev/urandom | head -c 12)
         vhost_size=$(curl -sk -o /dev/null -w "%{size_download}" -H "Host: ${rand_vhost}.${CLEAN}" "$BASE_URL" 2>/dev/null)
 
         ffuf -u "$BASE_URL" \
