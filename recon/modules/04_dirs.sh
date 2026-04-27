@@ -27,14 +27,23 @@ else
     BASE_URL="http://${CLEAN}"
 fi
 
-# Wordlists (Kali paths)
+# Wordlists (custom do user + Kali paths)
 WORDLISTS=(
+    "$HOME/Aulas/txts_uteis/raft-large-directories-lowercase.txt"
+    "$HOME/Aulas/txts_uteis/big.txt"
+    "$HOME/Aulas/txts_uteis/common.txt"
     "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt"
     "/usr/share/wordlists/dirb/common.txt"
     "/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt"
     "/usr/share/seclists/Discovery/Web-Content/common.txt"
     "/usr/share/wordlists/dirb/big.txt"
 )
+
+# Wordlist de extensões (para scan de arquivos)
+EXT_WL="$HOME/Aulas/txts_uteis/raft-small-extensions.txt"
+
+# Wordlist de arquivos
+FILES_WL="$HOME/Aulas/txts_uteis/raft-large-files-lowercase.txt"
 
 # Encontrar wordlist disponível
 WORDLIST=""
@@ -124,22 +133,57 @@ if has ffuf; then
         | tee "${OUTDIR}/ffuf_dirs.txt" 2>/dev/null
     ok "→ ffuf_dirs.txt"
 
-    # Extensões comuns
+    # Extensões: usar wordlist custom se existir, senão hardcoded
     info "ffuf — arquivos com extensões..."
-    # shellcheck disable=SC2086
-    ffuf -u "${BASE_URL}/FUZZ" \
-        -w "$WORDLIST" \
-        -e .php,.html,.txt,.bak,.old,.conf,.xml,.json,.sql,.zip,.tar.gz,.log \
-        -mc 200,204,301,302,307,401 \
-        -fc 404 \
-        -ac \
-        ${FILTER_ARGS} \
-        -t 50 \
-        -c \
-        -o "${OUTDIR}/ffuf_files.json" \
-        -of json \
-        | tee "${OUTDIR}/ffuf_files.txt" 2>/dev/null
+    if [[ -f "$EXT_WL" ]]; then
+        info "Usando extensões de: $(basename "$EXT_WL")"
+        # shellcheck disable=SC2086
+        ffuf -u "${BASE_URL}/FUZZ" \
+            -w "$WORDLIST" \
+            -e "$(head -50 "$EXT_WL" | tr '\n' ',' | sed 's/,$//')" \
+            -mc 200,204,301,302,307,401 \
+            -fc 404 \
+            -ac \
+            ${FILTER_ARGS} \
+            -t 50 \
+            -c \
+            -o "${OUTDIR}/ffuf_files.json" \
+            -of json \
+            | tee "${OUTDIR}/ffuf_files.txt" 2>/dev/null
+    else
+        # shellcheck disable=SC2086
+        ffuf -u "${BASE_URL}/FUZZ" \
+            -w "$WORDLIST" \
+            -e .php,.html,.txt,.bak,.old,.conf,.xml,.json,.sql,.zip,.tar.gz,.log \
+            -mc 200,204,301,302,307,401 \
+            -fc 404 \
+            -ac \
+            ${FILTER_ARGS} \
+            -t 50 \
+            -c \
+            -o "${OUTDIR}/ffuf_files.json" \
+            -of json \
+            | tee "${OUTDIR}/ffuf_files.txt" 2>/dev/null
+    fi
     ok "→ ffuf_files.txt"
+
+    # Se tiver wordlist de arquivos dedicada, rodar também
+    if [[ -f "$FILES_WL" ]]; then
+        info "ffuf — wordlist de arquivos: $(basename "$FILES_WL")..."
+        # shellcheck disable=SC2086
+        ffuf -u "${BASE_URL}/FUZZ" \
+            -w "$FILES_WL" \
+            -mc 200,204,301,302,307,401 \
+            -fc 404 \
+            -ac \
+            ${FILTER_ARGS} \
+            -t 50 \
+            -c \
+            -o "${OUTDIR}/ffuf_files_raft.json" \
+            -of json \
+            | tee "${OUTDIR}/ffuf_files_raft.txt" 2>/dev/null
+        ok "→ ffuf_files_raft.txt"
+    fi
 
 # ── gobuster fallback ──
 elif has gobuster; then
@@ -171,8 +215,76 @@ else
     exit 1
 fi
 
+# ── Bruteforce de subdomínios (DNS) ──
+is_ip() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+
+if ! is_ip "$CLEAN"; then
+    DNS_WL=""
+    for wl in "$HOME/Aulas/txts_uteis/subdomains-top1million-5000.txt" \
+              "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt" \
+              "/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt" \
+              "/usr/share/wordlists/amass/subdomains-top1mil-5000.txt" \
+              "/usr/share/wordlists/dirb/common.txt"; do
+        [[ -f "$wl" ]] && { DNS_WL="$wl"; break; }
+    done
+
+    if [[ -n "$DNS_WL" ]]; then
+        # Detectar wildcard DNS (domínio resolve qualquer sub)
+        rand_sub=$(tr -dc 'a-z' < /dev/urandom | head -c 14)
+        wildcard_ip=$(dig +short "${rand_sub}.${CLEAN}" A 2>/dev/null | head -1)
+
+        if [[ -n "$wildcard_ip" ]]; then
+            warn "Wildcard DNS detectado (*.${CLEAN} → ${wildcard_ip}). Filtrando."
+            WILD_FILTER="--wildcard"  # gobuster
+        else
+            ok "Sem wildcard DNS."
+            WILD_FILTER=""
+        fi
+
+        if has gobuster; then
+            info "gobuster dns — subdomínios de ${CLEAN}..."
+            # shellcheck disable=SC2086
+            gobuster dns -d "$CLEAN" \
+                -w "$DNS_WL" \
+                -t 50 \
+                ${WILD_FILTER} \
+                -o "${OUTDIR}/dns_brute.txt" \
+                --no-error 2>/dev/null || true
+            ok "→ dns_brute.txt"
+
+            if [[ -s "${OUTDIR}/dns_brute.txt" ]]; then
+                found=$(wc -l < "${OUTDIR}/dns_brute.txt")
+                echo -e "\n${BOLD}  Subdomínios encontrados (DNS brute): ${found}${RST}"
+                head -20 "${OUTDIR}/dns_brute.txt" | while read -r line; do
+                    echo -e "    ${GRN}→${RST} $line"
+                done
+                [[ "$found" -gt 20 ]] && echo -e "    ${YLW}... +$((found - 20)) mais${RST}"
+            fi
+
+        elif has ffuf; then
+            info "ffuf dns — subdomínios de ${CLEAN}..."
+            # ffuf não tem modo DNS nativo, usar resolução via curl
+            > "${OUTDIR}/dns_brute.txt"
+            while IFS= read -r sub; do
+                ip=$(dig +short "${sub}.${CLEAN}" A 2>/dev/null | head -1)
+                if [[ -n "$ip" && "$ip" != "$wildcard_ip" ]]; then
+                    echo "${sub}.${CLEAN} → ${ip}" >> "${OUTDIR}/dns_brute.txt"
+                    echo -e "    ${GRN}✔${RST} ${sub}.${CLEAN} → ${ip}"
+                fi
+            done < "$DNS_WL"
+            ok "→ dns_brute.txt"
+        fi
+    else
+        warn "Nenhuma wordlist DNS encontrada para bruteforce de subdomínios."
+    fi
+else
+    info "Alvo é IP, pulando bruteforce de subdomínios DNS."
+fi
+
+echo ""
+
 # ── Buscar vhosts ──
-if has ffuf; then
+if has ffuf && ! is_ip "$CLEAN"; then
     info "ffuf — vhost bruteforce..."
     VHOST_WL="/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
     if [[ -f "$VHOST_WL" ]]; then
