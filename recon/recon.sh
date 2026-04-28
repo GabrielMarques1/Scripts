@@ -117,12 +117,14 @@ show_menu() {
 
 run_module() {
     local module="$1"
+    shift
+    local extra_args="$*"
     local module_path="${MODULES_DIR}/${module}"
     if [[ ! -f "$module_path" ]]; then
         fail "Módulo não encontrado: ${module}"
         return 1
     fi
-    bash "$module_path" "$TARGET" "$OUTPUT_DIR" || {
+    bash "$module_path" "$TARGET" "$OUTPUT_DIR" $extra_args || {
         fail "Módulo '${module}' falhou (exit $?). Continuando..."
         return 1
     }
@@ -178,9 +180,11 @@ main() {
             6)
                 [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo (opção 0)"; continue; }
                 info "═══ FULL RECON INICIANDO ═══"
-                for mod in 01_subdomains.sh 02_ports.sh 03_webinfo.sh 04_dirs.sh 05_vulns.sh; do
+                for mod in 01_subdomains.sh 02_ports.sh 03_webinfo.sh 05_vulns.sh; do
                     [[ -f "${MODULES_DIR}/${mod}" ]] && { run_module "$mod" || true; }
                 done
+                # Módulo 04 em modo auto (sem menu interativo)
+                [[ -f "${MODULES_DIR}/04_dirs.sh" ]] && { run_module "04_dirs.sh" auto || true; }
                 generate_report
                 ok "═══ FULL RECON COMPLETO ═══"
                 ;;
