@@ -24,16 +24,25 @@ echo -e "\n${CYN}━━━ 🔌 MÓDULO 02 — Port Scan & Serviços ━━━${
 
 if ! has nmap; then fail "nmap não instalado!"; exit 1; fi
 
+# Detectar se é root para escolher tipo de scan
+if [[ $EUID -eq 0 ]]; then
+    SCAN_TYPE=""       # root: nmap usa SYN scan por padrão
+    info "Rodando como root — SYN scan."
+else
+    SCAN_TYPE="-sT"    # sem root: TCP connect scan (não pede sudo)
+    info "Sem root — usando TCP connect scan (-sT)."
+fi
+
 # Quick scan — top 1000
 info "Quick scan — top 1000 portas..."
-nmap -T4 --open -oN "${OUTDIR}/quick_scan.txt" -oG "${OUTDIR}/quick_scan.gnmap" "$CLEAN" 2>/dev/null
+nmap $SCAN_TYPE -T4 --open -Pn -oN "${OUTDIR}/quick_scan.txt" -oG "${OUTDIR}/quick_scan.gnmap" "$CLEAN" 2>/dev/null
 
 open_ports=$(grep -oP '\d+/open' "${OUTDIR}/quick_scan.gnmap" 2>/dev/null | cut -d/ -f1 | tr '\n' ',' | sed 's/,$//')
 
 # Se nada, scan completo
 if [[ -z "$open_ports" ]]; then
     warn "Nada no top 1000. Scan completo (-p-)..."
-    nmap -T4 -p- --open -oN "${OUTDIR}/full_scan.txt" -oG "${OUTDIR}/full_scan.gnmap" "$CLEAN" 2>/dev/null
+    nmap $SCAN_TYPE -T4 -p- --open -Pn -oN "${OUTDIR}/full_scan.txt" -oG "${OUTDIR}/full_scan.gnmap" "$CLEAN" 2>/dev/null
     open_ports=$(grep -oP '\d+/open' "${OUTDIR}/full_scan.gnmap" 2>/dev/null | cut -d/ -f1 | tr '\n' ',' | sed 's/,$//')
 fi
 
@@ -44,7 +53,7 @@ echo "$open_ports" > "${OUTDIR}/open_ports.txt"
 
 # Service & Version
 info "Detectando serviços (-sV -sC)..."
-nmap -sV -sC -T4 -p "$open_ports" -oN "${OUTDIR}/services.txt" -oX "${OUTDIR}/services.xml" "$CLEAN" 2>/dev/null
+nmap $SCAN_TYPE -sV -sC -T4 -Pn -p "$open_ports" -oN "${OUTDIR}/services.txt" -oX "${OUTDIR}/services.xml" "$CLEAN" 2>/dev/null
 ok "→ services.txt"
 
 echo -e "\n${BOLD}  Serviços:${RST}"
@@ -67,7 +76,7 @@ fi
 
 # Nmap vuln scripts
 info "Nmap vuln scripts..."
-nmap --script vuln -p "$open_ports" -oN "${OUTDIR}/nmap_vulns.txt" "$CLEAN" 2>/dev/null || true
+nmap $SCAN_TYPE --script vuln -Pn -p "$open_ports" -oN "${OUTDIR}/nmap_vulns.txt" "$CLEAN" 2>/dev/null || true
 ok "→ nmap_vulns.txt"
 
 echo -e "\n${GRN}━━━ Módulo 02 concluído ━━━${RST}"
