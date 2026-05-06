@@ -254,13 +254,29 @@ scan_params() {
         -o "${OUTDIR}/ffuf_params_discovery.json" \
         -of json 2>/dev/null | tee "${OUTDIR}/ffuf_params_discovery.txt" 2>/dev/null || true
 
-    # Extrair parâmetros encontrados do JSON
+    # Extrair parâmetros: tentar do texto (mais confiável) e do JSON
     local params_found=()
-    if [[ -s "${OUTDIR}/ffuf_params_discovery.json" ]]; then
-        while IFS= read -r p; do
-            [[ -n "$p" ]] && params_found+=("$p")
-        done < <(grep -oP '"input":\{"FUZZ":"\\K[^"]+' "${OUTDIR}/ffuf_params_discovery.json" 2>/dev/null | sort -u)
+    local params_file="${OUTDIR}/params_found_raw.txt"
+    > "$params_file"
+
+    # Fonte 1: Output de texto do ffuf (linhas com [Status:])
+    # Formato: "paramname    [Status: 200, Size: 1234, ...]"
+    if [[ -s "${OUTDIR}/ffuf_params_discovery.txt" ]]; then
+        grep '\[Status:' "${OUTDIR}/ffuf_params_discovery.txt" 2>/dev/null \
+            | awk '{print $1}' | sort -u >> "$params_file"
     fi
+
+    # Fonte 2: JSON do ffuf (fallback)
+    if [[ -s "${OUTDIR}/ffuf_params_discovery.json" ]]; then
+        grep -oP '"FUZZ"\s*:\s*"\K[^"]+' "${OUTDIR}/ffuf_params_discovery.json" 2>/dev/null \
+            | sort -u >> "$params_file"
+    fi
+
+    # Deduplicar e carregar
+    sort -u "$params_file" -o "$params_file"
+    while IFS= read -r p; do
+        [[ -n "$p" && "$p" != "FUZZ" ]] && params_found+=("$p")
+    done < "$params_file"
 
     if [[ ${#params_found[@]} -eq 0 ]]; then
         warn "Nenhum parâmetro oculto encontrado na fase A."
