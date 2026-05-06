@@ -18,6 +18,9 @@ fail()  { echo -e "${RED}[-]${RST} $1"; }
 has()   { command -v "$1" &>/dev/null; }
 is_ip() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 
+# Limpar códigos ANSI de arquivo
+strip_ansi() { sed -i 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$1" 2>/dev/null; }
+
 TARGET="${1:?Uso: $0 <alvo> <output_dir> [auto]}"
 OUTDIR="${2:?Uso: $0 <alvo> <output_dir>}/dirs"
 AUTO_MODE="${3:-}"
@@ -261,9 +264,10 @@ scan_params() {
 
     # Fonte 1: Output de texto do ffuf (linhas com [Status:])
     # Formato: "paramname    [Status: 200, Size: 1234, ...]"
+    # Precisa limpar ANSI codes do ffuf -c (cores)
     if [[ -s "${OUTDIR}/ffuf_params_discovery.txt" ]]; then
-        grep '\[Status:' "${OUTDIR}/ffuf_params_discovery.txt" 2>/dev/null \
-            | awk '{print $1}' | sort -u >> "$params_file"
+        sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' "${OUTDIR}/ffuf_params_discovery.txt" 2>/dev/null \
+            | grep '\[Status:' | awk '{print $1}' | sort -u >> "$params_file"
     fi
 
     # Fonte 2: JSON do ffuf (fallback)
@@ -612,4 +616,11 @@ if [[ "$AUTO_MODE" == "auto" ]]; then
 else
     run_interactive
 fi
+
+# Limpar ANSI de TODOS os arquivos de output
+info "Limpando output files..."
+for f in "${OUTDIR}"/*.txt; do
+    [[ -f "$f" ]] && strip_ansi "$f"
+done
+
 show_summary

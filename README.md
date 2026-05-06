@@ -91,8 +91,30 @@ Toolkit modular em Bash para automação completa de reconhecimento.
 | 01 | `01_subdomains.sh` | WHOIS, DNS, crt.sh, subfinder, amass, alive check |
 | 02 | `02_ports.sh` | nmap quick/full, services, OS detect, UDP, vuln scripts |
 | 03 | `03_webinfo.sh` | Headers, security headers, whatweb, WAF, robots, paths |
-| 04 | `04_dirs.sh` | ffuf/gobuster dirs + extensões + vhosts |
+| 04 | `04_dirs.sh` | **Fuzzing completo** (menu interativo — veja abaixo) |
 | 05 | `05_vulns.sh` | nikto, nuclei, searchsploit, SSL/TLS, CORS |
+
+**Módulo 04 — Fuzzing (menu interativo):**
+```
+  1) Diretórios           — ffuf/gobuster com calibração anti-FP
+  2) Vhosts               — Host header fuzzing (sites ocultos no mesmo IP)
+  3) Subdomínios DNS      — gobuster dns com wildcard detection
+  4) Extensões            — dirs + extensões (.php, .bak, .sql, etc.)
+  5) Arquivos             — wordlist de filenames (raft-large-files)
+  6) Parâmetros           — GET param discovery + teste de injeções
+  7) FULL                 — tudo sequencial (modo auto)
+```
+
+**Inteligências do módulo 04:**
+- 🎯 **Calibração automática** — detecta página 404 customizada e ajusta filtros (size/words/lines)
+- 🔍 **Parameter fuzzing** — descobre params ocultos, depois testa LFI, XSS, SQLi, SSTI, CMDI, SSRF
+- 🛡️ **Wildcard DNS detection** — evita falsos positivos em subdomínios
+- 📂 **Wordlists customizadas** — prioriza `~/Aulas/txts_uteis/`, fallback para Kali defaults
+- 🧹 **Limpeza ANSI** — remove códigos de cor dos arquivos de output
+
+**Módulo 02 — Detecção de privilégio:**
+- Sem root → TCP connect scan (`-sT`) — nunca pede sudo
+- Com root → SYN scan + OS detection + UDP
 
 **Uso:**
 ```bash
@@ -104,6 +126,9 @@ Toolkit modular em Bash para automação completa de reconhecimento.
 
 # Módulo standalone
 ./recon/modules/02_ports.sh 10.10.10.1 ./output/10.10.10.1
+
+# Módulo 04 standalone (abre menu de fuzzing)
+./recon/modules/04_dirs.sh 10.10.10.1 ./output/10.10.10.1
 ```
 
 ---
@@ -112,10 +137,21 @@ Toolkit modular em Bash para automação completa de reconhecimento.
 
 ```bash
 pip install requests       # Para scripts Python
-sudo apt install seclists  # Wordlists para o módulo 04
+sudo apt install seclists  # Wordlists para módulo 04
 ```
 
 Python 3.8+ · Kali Linux com ferramentas padrão + ffuf.
+
+**Wordlists customizadas (opcionais):**
+```
+~/Aulas/txts_uteis/
+├── raft-large-directories-lowercase.txt
+├── raft-large-files-lowercase.txt
+├── raft-small-extensions.txt
+├── subdomains-top1million-5000.txt
+├── big.txt
+└── common.txt
+```
 
 ---
 
@@ -127,11 +163,19 @@ Scripts/
 ├── NoSql.py                # NoSQL Injection — extrator por regex
 └── recon/
     ├── recon.sh             # Orquestrador principal
+    ├── output/              # Resultados organizados por alvo
+    │   └── <alvo>/
+    │       ├── subdomains/  # WHOIS, DNS, alive
+    │       ├── ports/       # Scans nmap
+    │       ├── webinfo/     # Headers, WAF, tech
+    │       ├── dirs/        # Fuzzing + param vulns
+    │       ├── vulns/       # Nikto, nuclei, CORS
+    │       └── report.txt   # Relatório consolidado
     └── modules/
         ├── 01_subdomains.sh # Subdomínios & DNS
         ├── 02_ports.sh      # Port scan & Serviços
         ├── 03_webinfo.sh    # Web fingerprint
-        ├── 04_dirs.sh       # Directory bruteforce
+        ├── 04_dirs.sh       # Fuzzing (dirs, vhosts, subs, params)
         └── 05_vulns.sh      # Vulnerability scan
 ```
 
@@ -143,3 +187,5 @@ Scripts/
 - Ajuste sempre o **alvo, delay e marcadores de sucesso** antes de executar.
 - O `sqli_blind.py` usa uma session por thread para evitar problemas com CSRF tokens.
 - Cada módulo do recon funciona **standalone** — pode rodar independente do `recon.sh`.
+- O módulo 04 tem **modo interativo** (escolha wordlist/tipo) e **modo auto** (FULL RECON).
+- Parameter fuzzing testa: LFI, XSS, SQLi, SSTI, CMDI, SSRF, Open Redirect.
