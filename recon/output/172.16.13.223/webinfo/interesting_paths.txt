@@ -1,0 +1,2 @@
+[403] /server-status
+[403] /.htaccess

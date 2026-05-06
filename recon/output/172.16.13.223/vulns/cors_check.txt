@@ -1,0 +1,10 @@
+═══ CORS Test ═══
+Origin: https://evil.com
+    Não refletido
+
+Origin: null
+    Não refletido
+
+Origin: https://172.16.13.223.evil.com
+    Não refletido
+

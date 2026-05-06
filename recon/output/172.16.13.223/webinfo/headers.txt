@@ -1,0 +1,16 @@
+═══ Response Headers ═══
+HTTP/1.1 200 OK
+Date: Tue, 05 May 2026 23:03:39 GMT
+Server: Apache/2.4.29 (Ubuntu)
+Content-Type: text/html; charset=UTF-8
+
+
+═══ Security Headers Check ═══
+  ✘ Strict-Transport-Security: AUSENTE
+  ✘ Content-Security-Policy: AUSENTE
+  ✘ X-Frame-Options: AUSENTE
+  ✘ X-Content-Type-Options: AUSENTE
+  ✘ X-XSS-Protection: AUSENTE
+  ✘ Referrer-Policy: AUSENTE
+  ✘ Permissions-Policy: AUSENTE
+  ✘ Access-Control-Allow-Origin: AUSENTE

