@@ -137,6 +137,7 @@ show_menu() {
     echo ""
     echo -e "  ${GRN}t${RST}) Checar ferramentas"
     echo -e "  ${GRN}r${RST}) Ver relatório"
+    echo -e "  ${GRN}b${RST}) Export Burp XML"
     echo -e "  ${GRN}q${RST}) Sair"
     echo ""
 }
@@ -317,6 +318,120 @@ HTMLFOOT
     ok "Relatório HTML: ${report_html}"
 }
 
+# ── Notificação (som + desktop) ──
+notify_done() {
+    local msg="${1:-Recon concluído!}"
+    # Beep terminal
+    echo -e "\a" 2>/dev/null
+    # Desktop notification (se disponível)
+    if command -v notify-send &>/dev/null; then
+        notify-send -i dialog-information "🔍 Recon Toolkit" "$msg" 2>/dev/null || true
+    fi
+    # macOS
+    if command -v osascript &>/dev/null; then
+        osascript -e "display notification \"$msg\" with title \"Recon Toolkit\"" 2>/dev/null || true
+    fi
+    ok "$msg"
+}
+
+# ── Export Burp Suite XML ──
+export_burp() {
+    local burp_file="${OUTPUT_DIR}/burp_targets.xml"
+
+    info "Gerando export Burp Suite..."
+
+    cat > "$burp_file" <<'XMLHEAD'
+<?xml version="1.0" encoding="UTF-8"?>
+<items burpVersion="2024.0" exportTime="TIMESTAMP">
+XMLHEAD
+    sed -i "s|TIMESTAMP|$(date '+%Y-%m-%d %H:%M:%S')|" "$burp_file"
+
+    local item_id=0
+
+    # URLs do alive check
+    if [[ -f "${OUTPUT_DIR}/subdomains/alive.txt" ]]; then
+        while IFS= read -r url; do
+            url=$(echo "$url" | awk '{print $1}')
+            [[ -z "$url" ]] && continue
+            item_id=$((item_id + 1))
+
+            local proto host port path
+            proto=$(echo "$url" | grep -oP '^https?' || echo "http")
+            host=$(echo "$url" | sed 's|https\?://||;s|/.*||;s|:.*||')
+            port=$(echo "$url" | grep -oP ':\K[0-9]+' || { [[ "$proto" == "https" ]] && echo 443 || echo 80; })
+
+            cat >> "$burp_file" <<EOF
+  <item>
+    <id>$item_id</id>
+    <host ip="">$host</host>
+    <port>$port</port>
+    <protocol>$proto</protocol>
+    <path>/</path>
+    <source>recon-toolkit</source>
+  </item>
+EOF
+        done < "${OUTPUT_DIR}/subdomains/alive.txt"
+    fi
+
+    # URLs do crawl
+    if [[ -f "${OUTPUT_DIR}/dirs/crawl_urls.txt" ]]; then
+        while IFS= read -r url; do
+            [[ -z "$url" ]] && continue
+            item_id=$((item_id + 1))
+
+            local proto host port path
+            proto=$(echo "$url" | grep -oP '^https?' || echo "http")
+            host=$(echo "$url" | sed 's|https\?://||;s|/.*||;s|:.*||')
+            port=$(echo "$url" | grep -oP ':\K[0-9]+' || { [[ "$proto" == "https" ]] && echo 443 || echo 80; })
+            path=$(echo "$url" | sed 's|https\?://[^/]*||' | head -c 200)
+            path="${path:-/}"
+
+            cat >> "$burp_file" <<EOF
+  <item>
+    <id>$item_id</id>
+    <host ip="">$host</host>
+    <port>$port</port>
+    <protocol>$proto</protocol>
+    <path>$(echo "$path" | sed 's/&/\&amp;/g;s/</\&lt;/g;s/>/\&gt;/g')</path>
+    <source>crawler</source>
+  </item>
+EOF
+        done < <(head -200 "${OUTPUT_DIR}/dirs/crawl_urls.txt")
+    fi
+
+    # URLs com parâmetros (gau + crawl)
+    for pfile in "${OUTPUT_DIR}/subdomains/gau_params.txt" "${OUTPUT_DIR}/dirs/crawl_params.txt"; do
+        [[ ! -f "$pfile" ]] && continue
+        while IFS= read -r url; do
+            [[ -z "$url" ]] && continue
+            item_id=$((item_id + 1))
+
+            local proto host port path
+            proto=$(echo "$url" | grep -oP '^https?' || echo "http")
+            host=$(echo "$url" | sed 's|https\?://||;s|/.*||;s|:.*||')
+            port=$(echo "$url" | grep -oP ':\K[0-9]+' || { [[ "$proto" == "https" ]] && echo 443 || echo 80; })
+            path=$(echo "$url" | sed 's|https\?://[^/]*||' | head -c 200)
+            path="${path:-/}"
+
+            cat >> "$burp_file" <<EOF
+  <item>
+    <id>$item_id</id>
+    <host ip="">$host</host>
+    <port>$port</port>
+    <protocol>$proto</protocol>
+    <path>$(echo "$path" | sed 's/&/\&amp;/g;s/</\&lt;/g;s/>/\&gt;/g')</path>
+    <source>params</source>
+  </item>
+EOF
+        done < <(head -100 "$pfile")
+    done
+
+    echo '</items>' >> "$burp_file"
+
+    ok "Burp XML: ${burp_file} (${item_id} targets)"
+    info "Importar no Burp: Target → Site map → Import → ${burp_file}"
+}
+
 main() {
     banner
     check_tools || true
@@ -342,17 +457,22 @@ main() {
             5) [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo (opção 0)"; continue; }; run_module "05_vulns.sh" || true ;;
             6)
                 [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo (opção 0)"; continue; }
+                local start_time=$SECONDS
                 info "═══ FULL RECON INICIANDO ═══"
                 for mod in 01_subdomains.sh 02_ports.sh 03_webinfo.sh 05_vulns.sh; do
                     [[ -f "${MODULES_DIR}/${mod}" ]] && { run_module "$mod" || true; }
                 done
-                # Módulo 04 em modo auto (sem menu interativo)
                 [[ -f "${MODULES_DIR}/04_dirs.sh" ]] && { run_module "04_dirs.sh" auto || true; }
                 generate_report
-                ok "═══ FULL RECON COMPLETO ═══"
+                export_burp
+                local elapsed=$(( SECONDS - start_time ))
+                local mins=$(( elapsed / 60 )) secs=$(( elapsed % 60 ))
+                notify_done "FULL RECON concluído em ${mins}m${secs}s — ${TARGET_CLEAN}"
+                ok "═══ FULL RECON COMPLETO (${mins}m${secs}s) ═══"
                 ;;
             t) check_tools || true ;;
             r) [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo"; continue; }; generate_report ;;
+            b) [[ -z "${TARGET:-}" ]] && { fail "Defina o alvo"; continue; }; export_burp ;;
             q) echo -e "\n${GRN}Até mais! 👋${RST}"; exit 0 ;;
             *) warn "Opção inválida." ;;
         esac
