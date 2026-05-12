@@ -18,6 +18,26 @@ BOLD='\033[1m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODULES_DIR="${SCRIPT_DIR}/modules"
+CONF_FILE="${SCRIPT_DIR}/recon.conf"
+
+# ── Carregar configuração global ──
+if [[ -f "$CONF_FILE" ]]; then
+    # shellcheck source=recon.conf
+    source "$CONF_FILE"
+else
+    # Defaults se não existir conf
+    THREADS_FFUF=50; THREADS_HTTPX=50; THREADS_KATANA=20; THREADS_GAU=5
+    TIMEOUT_CURL=5; TIMEOUT_GAU=120; TIMEOUT_AMASS=180
+    RATE_LIMIT_ADAPTIVE=true; RATE_LIMIT_MIN_THREADS=5
+    CRAWL_DEPTH=3; CLEAN_ANSI=true; REPORT_FORMAT="both"
+fi
+
+# Exportar pra módulos
+export THREADS_FFUF THREADS_HTTPX THREADS_KATANA THREADS_GAU THREADS_ALIVE
+export TIMEOUT_CURL TIMEOUT_FFUF TIMEOUT_GAU TIMEOUT_AMASS TIMEOUT_KATANA
+export RATE_LIMIT RATE_LIMIT_ADAPTIVE RATE_LIMIT_MIN_THREADS
+export CRAWL_DEPTH CLEAN_ANSI DEFAULT_EXTENSIONS
+export GAU_PATH KATANA_PATH URO_PATH HTTPX_PATH
 
 # ── Funções utilitárias ──
 banner() {

