@@ -83,6 +83,12 @@ check_tools() {
     check_tool amass       || true
     check_tool theHarvester || true
 
+    echo -e "\n${BOLD} Recon Avançado:${RST}"
+    check_tool httpx       || true
+    check_tool gau         || true
+    check_tool katana      || true
+    check_tool uro         || true
+
     echo -e "\n${BOLD} Vuln Scan:${RST}"
     check_tool nuclei      || true
     check_tool searchsploit || true
@@ -131,7 +137,10 @@ run_module() {
 }
 
 generate_report() {
-    local report="${OUTPUT_DIR}/report.txt"
+    local report_txt="${OUTPUT_DIR}/report.txt"
+    local report_html="${OUTPUT_DIR}/report.html"
+
+    # ── Relatório TXT (mantido) ──
     {
         echo "═══════════════════════════════════════"
         echo " RECON REPORT — ${TARGET_CLEAN}"
@@ -149,9 +158,143 @@ generate_report() {
                 done
             fi
         done
-    } > "$report"
-    ok "Relatório salvo em: ${report}"
-    cat "$report"
+    } > "$report_txt"
+
+    # ── Relatório HTML ──
+    cat > "$report_html" <<'HTMLHEAD'
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Recon Report</title>
+<style>
+  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3;
+          --green: #3fb950; --red: #f85149; --yellow: #d29922; --blue: #58a6ff;
+          --cyan: #39d2c0; --purple: #bc8cff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 2rem; }
+  .header { text-align: center; margin-bottom: 2rem; padding: 2rem; background: linear-gradient(135deg, #161b22, #1a2332);
+            border: 1px solid var(--border); border-radius: 12px; }
+  .header h1 { font-size: 1.8rem; color: var(--cyan); margin-bottom: 0.5rem; }
+  .header .meta { color: #8b949e; font-size: 0.9rem; }
+  .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+  .stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; text-align: center; }
+  .stat .num { font-size: 1.8rem; font-weight: bold; }
+  .stat .label { color: #8b949e; font-size: 0.8rem; margin-top: 0.3rem; }
+  .section { background: var(--card); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 1rem; overflow: hidden; }
+  .section-header { padding: 1rem 1.2rem; cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+                    font-weight: 600; font-size: 1.1rem; transition: background 0.2s; }
+  .section-header:hover { background: #1a2332; }
+  .section-header .icon { transition: transform 0.3s; }
+  .section-header.open .icon { transform: rotate(90deg); }
+  .section-body { padding: 0 1.2rem 1.2rem; display: none; }
+  .section-body.show { display: block; }
+  .file-block { margin-bottom: 1rem; }
+  .file-name { color: var(--blue); font-weight: 600; font-size: 0.9rem; margin-bottom: 0.4rem;
+               padding: 0.3rem 0; border-bottom: 1px solid var(--border); }
+  pre { background: #0d1117; padding: 0.8rem; border-radius: 6px; overflow-x: auto;
+        font-size: 0.8rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow-y: auto; }
+  .vuln { color: var(--red); } .ok { color: var(--green); } .warn { color: var(--yellow); }
+  .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+  .badge-green { background: #1a3a2a; color: var(--green); } .badge-red { background: #3a1a1a; color: var(--red); }
+  .badge-yellow { background: #3a2e1a; color: var(--yellow); } .badge-blue { background: #1a2a3a; color: var(--blue); }
+  footer { text-align: center; color: #484f58; padding: 2rem; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+HTMLHEAD
+
+    # Header
+    cat >> "$report_html" <<EOF
+<div class="header">
+  <h1>🔍 Recon Report</h1>
+  <div class="meta">${TARGET_CLEAN} — $(date '+%Y-%m-%d %H:%M:%S')</div>
+</div>
+EOF
+
+    # Contar resultados por módulo
+    local sub_count=0 port_count=0 web_count=0 dir_count=0 vuln_count=0
+    [[ -f "${OUTPUT_DIR}/subdomains/all_subdomains.txt" ]] && sub_count=$(wc -l < "${OUTPUT_DIR}/subdomains/all_subdomains.txt" 2>/dev/null || echo 0)
+    [[ -f "${OUTPUT_DIR}/subdomains/alive.txt" ]] && alive_count=$(wc -l < "${OUTPUT_DIR}/subdomains/alive.txt" 2>/dev/null || echo 0) || alive_count=0
+    [[ -f "${OUTPUT_DIR}/ports/quick_scan.gnmap" ]] && port_count=$(grep -c '/open' "${OUTPUT_DIR}/ports/quick_scan.gnmap" 2>/dev/null || echo 0)
+    for f in "${OUTPUT_DIR}/dirs"/ffuf_*.txt "${OUTPUT_DIR}/dirs"/gobuster_*.txt; do
+        [[ -f "$f" ]] && dir_count=$((dir_count + $(wc -l < "$f" 2>/dev/null || echo 0)))
+    done
+    [[ -f "${OUTPUT_DIR}/dirs/params_vulns.txt" ]] && vuln_count=$(grep -c "VULN" "${OUTPUT_DIR}/dirs/params_vulns.txt" 2>/dev/null || echo 0)
+
+    cat >> "$report_html" <<EOF
+<div class="summary">
+  <div class="stat"><div class="num ok">${sub_count}</div><div class="label">Subdomínios</div></div>
+  <div class="stat"><div class="num" style="color:var(--cyan)">${alive_count}</div><div class="label">Alive</div></div>
+  <div class="stat"><div class="num" style="color:var(--purple)">${port_count}</div><div class="label">Portas</div></div>
+  <div class="stat"><div class="num" style="color:var(--blue)">${dir_count}</div><div class="label">Dirs/Files</div></div>
+  <div class="stat"><div class="num vuln">${vuln_count}</div><div class="label">Vulns</div></div>
+</div>
+EOF
+
+    # Seções
+    local section_idx=0
+    local -A SECTION_ICONS=( [subdomains]="📡" [ports]="🔌" [webinfo]="🌐" [dirs]="📂" [vulns]="⚠️" )
+    local -A SECTION_COLORS=( [subdomains]="var(--green)" [ports]="var(--purple)" [webinfo]="var(--blue)" [dirs]="var(--cyan)" [vulns]="var(--red)" )
+
+    for dir in subdomains ports webinfo dirs vulns; do
+        local path="${OUTPUT_DIR}/${dir}"
+        [[ ! -d "$path" ]] && continue
+        local has_files=false
+        for f in "$path"/*.txt "$path"/*.json; do [[ -f "$f" ]] && { has_files=true; break; }; done
+        $has_files || continue
+
+        section_idx=$((section_idx + 1))
+        local icon="${SECTION_ICONS[$dir]:-📄}"
+        local scolor="${SECTION_COLORS[$dir]:-var(--text)}"
+
+        local file_count=0
+        for f in "$path"/*.txt; do [[ -f "$f" && -s "$f" ]] && file_count=$((file_count + 1)); done
+
+        cat >> "$report_html" <<EOF
+<div class="section">
+  <div class="section-header" onclick="toggle(this)" style="color:${scolor}">
+    <span>${icon} ${dir^^} <span class="badge badge-blue">${file_count} arquivos</span></span>
+    <span class="icon">▶</span>
+  </div>
+  <div class="section-body">
+EOF
+        for f in "$path"/*.txt; do
+            [[ ! -f "$f" || ! -s "$f" ]] && continue
+            local fname
+            fname=$(basename "$f")
+            # Escapar HTML
+            local content
+            content=$(sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' "$f" | head -500)
+            cat >> "$report_html" <<EOF
+    <div class="file-block">
+      <div class="file-name">📄 ${fname}</div>
+      <pre>${content}</pre>
+    </div>
+EOF
+        done
+
+        echo '  </div></div>' >> "$report_html"
+    done
+
+    # Footer + JS
+    cat >> "$report_html" <<'HTMLFOOT'
+<footer>Gerado por Recon Automation Toolkit</footer>
+<script>
+function toggle(el) {
+  el.classList.toggle('open');
+  el.nextElementSibling.classList.toggle('show');
+}
+// Abrir primeira seção por padrão
+document.querySelector('.section-header')?.click();
+</script>
+</body>
+</html>
+HTMLFOOT
+
+    ok "Relatório TXT: ${report_txt}"
+    ok "Relatório HTML: ${report_html}"
 }
 
 main() {
